@@ -183,13 +183,26 @@ lookup_history() {
         [ -z "$(find_asset "$item")" ] && break
     done
     [ -z "$(find_asset "$item")" ] || return 0
-    echo '部分插件缺少匹配包，正在查找最近 10 期发布（联网最多约 8 秒）…'
+    echo '部分插件缺包，正在查询最近 10 期发布（每条线路最多约 8 秒）…'
     history_url="https://api.github.com/repos/$repo/releases?per_page=10"
-    if [ "$metadata_source" != direct ]; then history_url="$metadata_source/$history_url"; fi
-    if ! fetch --max-time 8 --max-filesize 4194304 -o "$work/history.json" "$history_url" 2>/dev/null; then
-        echo '暂时无法查询历史发布。'
+    history_ok=0
+    for source in "$metadata_source" direct; do
+        request=$history_url
+        [ "$source" = direct ] || request="$source/$history_url"
+        if fetch --max-time 8 --max-filesize 4194304 -o "$work/history.json" "$request" 2>/dev/null &&
+           first_tag=$(jsonfilter -i "$work/history.json" -e '@[0].tag_name' 2>/dev/null) &&
+           [ -n "$first_tag" ]; then
+            history_ok=1
+            break
+        fi
+        [ "$source" != direct ] || break
+        echo '加速线路未返回有效历史清单，尝试 GitHub 直连…'
+    done
+    if [ "$history_ok" -eq 0 ]; then
+        echo '历史清单查询失败，仅显示当前发布的匹配结果。'
         return 0
     fi
+    history_count=0
     index=0
     while [ "$index" -lt 10 ]; do
         if ! jsonfilter -i "$work/history.json" -e "@[$index]" > "$work/history-item.json" 2>/dev/null ||
@@ -205,7 +218,9 @@ lookup_history() {
         [ "$(jsonfilter -i "$work/history-item.json" -e '@.prerelease')" = false ] || continue
         jsonfilter -i "$work/history-item.json" -e '@.assets[*].name' > "$work/old-$old_tag.assets" 2>/dev/null || continue
         cp "$work/history-item.json" "$work/old-$old_tag.json"
+        history_count=$((history_count+1))
     done
+    printf '历史清单查询成功，已读取 %s 期较早的正式发布。\n' "$history_count"
 }
 
 resolve_asset() {
