@@ -86,7 +86,7 @@ read_release() {
 }
 
 # Encoding keeps the built-in list compact and is not a secret.
-builtin=$(printf '%s' 'aHR0cHM6Ly9naC1wcm94eS5jb20KaHR0cHM6Ly9naGZhc3QudG9wCmh0dHBzOi8vZ2hwcm94eS5uZXQKaHR0cHM6Ly9jZG4uYWthZXJlLm9ubGluZQo=' | base64 -d)
+builtin=$(printf '%s' 'aHR0cHM6Ly9naC1wcm94eS5jb20KaHR0cHM6Ly9naGZhc3QudG9wCmh0dHBzOi8vZ2hwcm94eS5uZXQKaHR0cHM6Ly9mYXN0Z2l0LmNjCg==' | base64 -d)
 load_mirrors() {
     [ ! -f "$work/mirrors" ] || return 0
     : > "$work/mirrors"
