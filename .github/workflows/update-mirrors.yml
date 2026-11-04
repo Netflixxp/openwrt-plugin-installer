@@ -1,0 +1,53 @@
+name: Update installer mirrors
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: installer-mirrors
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update the four built-in mirrors
+        env:
+          OPENWRT_MIRRORS: ${{ vars.OPENWRT_MIRRORS }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          import re
+          from pathlib import Path
+
+          urls = [line.strip().lower() for line in os.environ["OPENWRT_MIRRORS"].splitlines() if line.strip()]
+          urls = [url.removesuffix("/") for url in urls]
+          hostname = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+          pattern = rf"https://(?:{hostname}\.)+[a-z]{{2,63}}"
+          if len(urls) != 4 or len(set(urls)) != 4 or not all(re.fullmatch(pattern, url) for url in urls):
+              raise SystemExit("OPENWRT_MIRRORS must contain four distinct HTTPS hostnames, one per line.")
+          value = base64.b64encode(("\n".join(urls) + "\n").encode()).decode()
+          path = Path("openwrt-plugin-install.sh")
+          source = path.read_text()
+          lines = source.splitlines(keepends=True)
+          targets = [i for i, line in enumerate(lines) if line.startswith("builtin=$(printf ")]
+          if len(targets) != 1:
+              raise SystemExit("Could not find the installer mirror setting.")
+          lines[targets[0]] = f"builtin=$(printf '%s' '{value}' | base64 -d)\n"
+          path.write_text("".join(lines))
+          PY
+          sh -n openwrt-plugin-install.sh
+          if git diff --quiet -- openwrt-plugin-install.sh; then
+            echo "The installer already uses these mirrors."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add openwrt-plugin-install.sh
+          git commit -m "Update built-in installer mirrors"
+          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
