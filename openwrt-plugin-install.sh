@@ -154,7 +154,7 @@ find_asset() {
             if (name !~ ("^" plugin "[-_]")) next
             if (name ~ ("[-_]" arch "([-_.]|$)")) print $0
         }
-    ' "$work/assets"
+    ' "${2:-$work/assets}"
 }
 plugin_name() {
     case "$1" in
@@ -177,15 +177,76 @@ asset_version() {
         else print "最新发布"
     }'
 }
+# Query one bounded page only when a requested plugin is missing.
+lookup_history() {
+    for item do
+        [ -z "$(find_asset "$item")" ] && break
+    done
+    [ -z "$(find_asset "$item")" ] || return 0
+    echo '部分插件缺少匹配包，正在查找最近 10 期发布（联网最多约 8 秒）…'
+    history_url="https://api.github.com/repos/$repo/releases?per_page=10"
+    if [ "$metadata_source" != direct ]; then history_url="$metadata_source/$history_url"; fi
+    if ! fetch --max-time 8 --max-filesize 4194304 -o "$work/history.json" "$history_url" 2>/dev/null; then
+        echo '暂时无法查询历史发布。'
+        return 0
+    fi
+    index=0
+    while [ "$index" -lt 10 ]; do
+        if ! jsonfilter -i "$work/history.json" -e "@[$index]" > "$work/history-item.json" 2>/dev/null ||
+           [ ! -s "$work/history-item.json" ]; then
+            break
+        fi
+        index=$((index+1))
+        old_tag=$(jsonfilter -i "$work/history-item.json" -e '@.tag_name' 2>/dev/null) || continue
+        case "$old_tag" in ????-??-??) ;; *) continue;; esac
+        case "$old_tag" in *[!0-9-]*) continue;; esac
+        [ "$(printf '%s\n' "$tag" "$old_tag" | sort -u | head -n 1)" = "$old_tag" ] &&
+            [ "$old_tag" != "$tag" ] || continue
+        [ "$(jsonfilter -i "$work/history-item.json" -e '@.prerelease')" = false ] || continue
+        jsonfilter -i "$work/history-item.json" -e '@.assets[*].name' > "$work/old-$old_tag.assets" 2>/dev/null || continue
+        cp "$work/history-item.json" "$work/old-$old_tag.json"
+    done
+}
+
+resolve_asset() {
+    asset_tag=$tag
+    asset_json="$work/release.json"
+    asset=$(find_asset "$1")
+    [ -z "$asset" ] || return 0
+    for old_tag in $(printf '%s\n' "$work"/old-*.json | sort -r); do
+        [ -f "$old_tag" ] || continue
+        matches=$(find_asset "$1" "${old_tag%.json}.assets")
+        case "$matches" in ''|*[!A-Za-z0-9._-]*) continue;; esac
+        old_digest=$(jsonfilter -i "$old_tag" -e "@.assets[@.name=\"$matches\"].digest" 2>/dev/null) || continue
+        printf '%s\n' "$old_digest" | awk '/^sha256:[0-9a-f]+$/ && length($0)==71 {ok=1} END {exit !ok}' || continue
+        asset=$matches
+        asset_json=$old_tag
+        asset_tag=${old_tag##*/old-}
+        asset_tag=${asset_tag%.json}
+        break
+    done
+}
+
+if [ -z "$plugin" ] || [ "$mode" = --list ]; then
+    lookup_history passwall passwall2 openclash ssrp nikki homeproxy dae
+else
+    lookup_history "$plugin"
+fi
+
 show_menu() {
     number=0
     for item in passwall passwall2 openclash ssrp nikki homeproxy dae; do
         number=$((number+1))
-        matches=$(find_asset "$item")
+        resolve_asset "$item"
+        matches=$asset
         label=$(plugin_name "$item")
         case "$matches" in
             ''|*[!A-Za-z0-9._-]*) printf '%s) %-10s 暂无可用版本\n' "$number" "$label" ;;
-            *) printf '%s) %-10s 最新版 %s\n' "$number" "$label" "$(asset_version "$matches")"
+            *) if [ "$asset_tag" = "$tag" ]; then
+                   printf '%s) %-10s 最新版 %s\n' "$number" "$label" "$(asset_version "$matches")"
+               else
+                   printf '%s) %-10s %s（历史发布 %s）\n' "$number" "$label" "$(asset_version "$matches")" "$asset_tag"
+               fi
                detail "   $matches" ;;
         esac
     done
@@ -201,19 +262,19 @@ if [ -z "$plugin" ] || [ "$mode" = --list ]; then
         *) die '无效选项。';;
     esac
 fi
-asset=$(find_asset "$plugin")
+resolve_asset "$plugin"
 case "$asset" in
-    '') die "Release $tag 没有 $plugin 的 $manager / $arch 安装包。" ;;
+    '') die "最近查询的发布中没有 $plugin 的 $manager / $arch 安装包。" ;;
     *[!A-Za-z0-9._-]*) die '有多个匹配包或包名异常，停止自动安装。' ;;
 esac
-digest=$(jsonfilter -i "$work/release.json" -e "@.assets[@.name=\"$asset\"].digest")
-size=$(jsonfilter -i "$work/release.json" -e "@.assets[@.name=\"$asset\"].size")
+digest=$(jsonfilter -i "$asset_json" -e "@.assets[@.name=\"$asset\"].digest")
+size=$(jsonfilter -i "$asset_json" -e "@.assets[@.name=\"$asset\"].size")
 case "$size" in ''|*[!0-9]*) die '发布元数据缺少有效文件大小。';; esac
 sha=${digest#sha256:}
 case "$sha" in *[!0-9a-f]*) die 'SHA-256 格式无效。';; esac
 [ "$digest" = "sha256:$sha" ] && [ "${#sha}" -eq 64 ] || die 'GitHub 没有提供 SHA-256，停止。'
-url="https://github.com/$repo/releases/download/$tag/$asset"
-printf '%s 最新版 %s\n' "$(plugin_name "$plugin")" "$(asset_version "$asset")"
+url="https://github.com/$repo/releases/download/$asset_tag/$asset"
+printf '%s %s（发布 %s）\n' "$(plugin_name "$plugin")" "$(asset_version "$asset")" "$asset_tag"
 detail "文件 $asset ($size 字节)
 $url
 SHA-256 $sha"
