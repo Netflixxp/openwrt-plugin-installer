@@ -132,12 +132,16 @@ if [ ! -s "$work/selected" ]; then
     release_group=direct
     query_group direct
 fi
-read -r elapsed number metadata_source tag < "$work/selected" ||
-    die '加速线路和 GitHub 直连都无法查询版本，请稍后重试。'
-mv "$work/release-$number.json" "$work/release.json"
-mv "$work/release-$number.assets" "$work/assets"
+if read -r elapsed number metadata_source tag < "$work/selected"; then
+    mv "$work/release-$number.json" "$work/release.json"
+    mv "$work/release-$number.assets" "$work/assets"
+else
+    metadata_source=direct
+    tag=
+    : > "$work/assets"
+fi
 detail "发布信息来源 $metadata_source"
-printf '\nOpenWrt 插件安装助手 · 发布日期 %s\n\n' "$tag"
+printf '\nOpenWrt 插件安装助手\n\n'
 
 find_asset() {
     awk -v plugin="$1" -v arch="$arch" -v manager="$manager" '
@@ -170,6 +174,12 @@ asset_version() {
         sub(/^luci-app-/, "", name)
         gsub(/aarch64_a53/, "aarch64_cortex-a53", name)
         gsub(/x86-64/, "x86_64", name)
+        gsub(/aarch64_a72/, "aarch64_cortex-a72", name)
+        sub(/_all_sdk_[0-9.]+$/, "", name)
+        sub(/[+](aarch64|x86_64)_core_sdk_[0-9.]+$/, "", name)
+        sub(/^openwrt-nikki_/, "nikki_", name)
+        sub(/^ssr-plus_/, "ssrp_", name)
+        sub(/^daede_/, "dae_", name)
         sub("[-_]" arch, "", name)
         sub(/^(openwrt-daede|ssrp[-_]mihomo|shadowsocksr|passwall2?|openclash|nikki|homeproxy|ssrp|dae)[-_]/, "", name)
         gsub(/_/, "-", name)
@@ -177,12 +187,64 @@ asset_version() {
         else print "最新发布"
     }'
 }
+are_repo=bcseputetto/Are-u-ok
+are_tag=
+case "$version" in
+    24.10|24.10.*|24.10-*) are_tag=iStoreOS_24.10 ;;
+    25.12|25.12.*|25.12-*) are_tag=iStoreOS_25.12 ;;
+esac
+
+load_are_release() {
+    [ -n "$are_tag" ] || return 0
+    echo "正在查询优先来源 Are-u-ok（$are_tag）…"
+    are_api="https://api.github.com/repos/$are_repo/releases/tags/$are_tag"
+    for are_source in "$metadata_source" direct; do
+        request=$are_api
+        [ "$are_source" = direct ] || request="$are_source/$are_api"
+        if fetch --max-time 8 --max-filesize 4194304 -o "$work/are.json" "$request" 2>/dev/null &&
+           [ "$(jsonfilter -i "$work/are.json" -e '@.tag_name' 2>/dev/null)" = "$are_tag" ] &&
+           jsonfilter -i "$work/are.json" -e '@.assets[*].name' > "$work/are.assets" 2>/dev/null &&
+           [ -s "$work/are.assets" ]; then
+            return 0
+        fi
+        [ "$are_source" != direct ] || break
+    done
+    : > "$work/are.assets"
+    echo 'Are-u-ok 查询未成功，使用 CloudRunFilesBuilder。'
+}
+
+find_are_asset() {
+    [ -s "$work/are.assets" ] || return 0
+    candidate=$(awk -v plugin="$1" -v arch="$arch" -v sdk="${are_tag#iStoreOS_}" '
+        {
+            name=tolower($0)
+            sub(/^openwrt-nikki_/, "nikki_", name)
+            sub(/^ssr-plus_/, "ssrp_", name)
+            sub(/^daede_/, "dae_", name)
+            gsub(/aarch64_a53/, "aarch64_cortex-a53", name)
+            gsub(/aarch64_a72/, "aarch64_cortex-a72", name)
+            if (name !~ ("^" plugin "_") || substr(name, length(name)-length(sdk)-8) != ("_sdk_" sdk ".run")) next
+            if (name ~ ("_" arch "_all_sdk_")) print $0
+            else if (plugin=="openclash" && ((arch ~ /^aarch64_/ && name ~ /[+]aarch64_core_sdk_/) ||
+                     (arch=="x86_64" && name ~ /[+]x86_64_core_sdk_/))) print $0
+        }' "$work/are.assets")
+    case "$candidate" in ''|*[!A-Za-z0-9._+-]*) return 0;; esac
+    candidate_digest=$(jsonfilter -i "$work/are.json" -e "@.assets[@.name=\"$candidate\"].digest" 2>/dev/null) || return 0
+    printf '%s\n' "$candidate_digest" | awk '/^sha256:[0-9a-f]+$/ && length($0)==71 {ok=1} END {exit !ok}' || return 0
+    printf '%s\n' "$candidate"
+}
+
+load_are_release
+[ -s "$work/assets" ] || [ -s "$work/are.assets" ] ||
+    die '两个软件包来源都无法查询，请稍后重试。'
+
 # Query one bounded page only when a requested plugin is missing.
 lookup_history() {
+    [ -n "$tag" ] || return 0
     for item do
-        [ -z "$(find_asset "$item")" ] && break
+        [ -z "$(find_are_asset "$item")$(find_asset "$item")" ] && break
     done
-    [ -z "$(find_asset "$item")" ] || return 0
+    [ -z "$(find_are_asset "$item")$(find_asset "$item")" ] || return 0
     echo '部分插件缺包，正在查询最近 10 期发布（每条线路最多约 8 秒）…'
     history_url="https://api.github.com/repos/$repo/releases?per_page=10"
     history_ok=0
@@ -224,6 +286,16 @@ lookup_history() {
 }
 
 resolve_asset() {
+    asset_repo=$repo
+    asset_source=$metadata_source
+    asset=$(find_are_asset "$1")
+    if [ -n "$asset" ]; then
+        asset_repo=$are_repo
+        asset_source=$are_source
+        asset_tag=$are_tag
+        asset_json="$work/are.json"
+        return 0
+    fi
     asset_tag=$tag
     asset_json="$work/release.json"
     asset=$(find_asset "$1")
@@ -231,7 +303,7 @@ resolve_asset() {
     for old_tag in $(printf '%s\n' "$work"/old-*.json | sort -r); do
         [ -f "$old_tag" ] || continue
         matches=$(find_asset "$1" "${old_tag%.json}.assets")
-        case "$matches" in ''|*[!A-Za-z0-9._-]*) continue;; esac
+        case "$matches" in ''|*[!A-Za-z0-9._+-]*) continue;; esac
         old_digest=$(jsonfilter -i "$old_tag" -e "@.assets[@.name=\"$matches\"].digest" 2>/dev/null) || continue
         printf '%s\n' "$old_digest" | awk '/^sha256:[0-9a-f]+$/ && length($0)==71 {ok=1} END {exit !ok}' || continue
         asset=$matches
@@ -256,8 +328,10 @@ show_menu() {
         matches=$asset
         label=$(plugin_name "$item")
         case "$matches" in
-            ''|*[!A-Za-z0-9._-]*) printf '%s) %-10s 暂无可用版本\n' "$number" "$label" ;;
-            *) if [ "$asset_tag" = "$tag" ]; then
+            ''|*[!A-Za-z0-9._+-]*) printf '%s) %-10s 暂无可用版本\n' "$number" "$label" ;;
+            *) if [ "$asset_repo" = "$are_repo" ]; then
+                   printf '%s) %-10s %s（Are-u-ok）\n' "$number" "$label" "$(asset_version "$matches")"
+               elif [ "$asset_tag" = "$tag" ]; then
                    printf '%s) %-10s 最新版 %s\n' "$number" "$label" "$(asset_version "$matches")"
                else
                    printf '%s) %-10s %s（历史发布 %s）\n' "$number" "$label" "$(asset_version "$matches")" "$asset_tag"
@@ -280,7 +354,7 @@ fi
 resolve_asset "$plugin"
 case "$asset" in
     '') die "最近查询的发布中没有 $plugin 的 $manager / $arch 安装包。" ;;
-    *[!A-Za-z0-9._-]*) die '有多个匹配包或包名异常，停止自动安装。' ;;
+    *[!A-Za-z0-9._+-]*) die '有多个匹配包或包名异常，停止自动安装。' ;;
 esac
 digest=$(jsonfilter -i "$asset_json" -e "@.assets[@.name=\"$asset\"].digest")
 size=$(jsonfilter -i "$asset_json" -e "@.assets[@.name=\"$asset\"].size")
@@ -288,7 +362,7 @@ case "$size" in ''|*[!0-9]*) die '发布元数据缺少有效文件大小。';; 
 sha=${digest#sha256:}
 case "$sha" in *[!0-9a-f]*) die 'SHA-256 格式无效。';; esac
 [ "$digest" = "sha256:$sha" ] && [ "${#sha}" -eq 64 ] || die 'GitHub 没有提供 SHA-256，停止。'
-url="https://github.com/$repo/releases/download/$asset_tag/$asset"
+url="https://github.com/$asset_repo/releases/download/$asset_tag/$asset"
 printf '%s %s（发布 %s）\n' "$(plugin_name "$plugin")" "$(asset_version "$asset")" "$asset_tag"
 detail "文件 $asset ($size 字节)
 $url
@@ -314,8 +388,8 @@ probe() {
 }
 
 echo '[3/7] 等待确认，确认后开始测速和下载。'
-if [ "$metadata_source" != direct ]; then
-    printf '版本信息和校验值来自第三方加速节点 %s。\n' "$metadata_source"
+if [ "$asset_source" != direct ]; then
+    printf '版本信息和校验值来自第三方加速节点 %s。\n' "$asset_source"
     echo '仅在信任该节点时继续安装。'
 fi
 printf '安装或更新这个插件？输入 y 继续，回车取消: '
@@ -352,16 +426,16 @@ download_package() {
     return 1
 }
 
-if [ "$release_group" = direct ]; then
+if [ "$asset_source" = direct ]; then
     echo '[4/7] 加速查询未成功，使用 GitHub 直连。'
 else
     echo '[4/7] 已选出查询最快的可用线路，将沿用该线路下载。'
 fi
 echo '[5/7] 正在下载安装包…'
 downloaded=0
-if download_package "$metadata_source"; then
+if download_package "$asset_source"; then
     downloaded=1
-elif [ "$release_group" = builtin ]; then
+elif [ "$asset_source" != direct ] && [ "$release_group" = builtin ]; then
     echo '      优选线路下载未完成，尝试网站候选（测速最多约 10 秒）…'
     load_mirrors
     best=$(pick_mirror $(cat "$work/mirrors"))
@@ -369,7 +443,7 @@ elif [ "$release_group" = builtin ]; then
         downloaded=1
     fi
 fi
-if [ "$downloaded" -eq 0 ] && [ "$release_group" != direct ]; then
+if [ "$downloaded" -eq 0 ] && [ "$asset_source" != direct ]; then
     echo '      加速下载未完成，尝试 GitHub 直连一次。'
     if download_package direct; then
         downloaded=1
