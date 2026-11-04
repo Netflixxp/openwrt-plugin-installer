@@ -30,7 +30,7 @@ sh /tmp/openwrt-plugin-install.sh
 
 脚本会同时检查固件版本、实际包管理器和软件包架构。iStoreOS、ImmortalWrt 等衍生固件能否安装，取决于设备上的软件源和上游有没有为对应架构提供安装包。
 
-菜单包含 **PassWall、PassWall2、OpenClash、SSRP、Nikki、HomeProxy 和 dae**。安装包来自 [CloudRunFilesBuilder Releases](https://github.com/wkccd/CloudRunFilesBuilder/releases)。菜单中的「最新版」指该仓库最新一期发布中与当前设备匹配的版本。某个插件显示「暂无可用版本」时，这一期没有可供脚本自动选择的匹配包。
+菜单包含 **PassWall、PassWall2、OpenClash、SSRP、Nikki、HomeProxy 和 dae**。安装包来自 [CloudRunFilesBuilder Releases](https://github.com/wkccd/CloudRunFilesBuilder/releases)。菜单中的「最新版」指该仓库最新一期发布中与当前设备匹配的版本。最新一期缺包时，脚本额外查询最近 10 期发布，选择同架构、同包管理器且提供 SHA-256 的最新历史包，并标明发布日期。查询失败或没有符合条件的包时，会显示「暂无可用版本」。
 
 ## 加速和安装流程
 
